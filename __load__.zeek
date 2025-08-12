@@ -32,3 +32,4 @@ redef record connection += { fp: FINGERPRINT::Info &optional; };
 @if (JA4T_enabled)
   @load ./ja4t
 @endif
+@load ja4
