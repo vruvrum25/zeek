@@ -199,8 +199,8 @@ function do_ja4(c: connection) {
   }
   c$fp$ja4$done = T;
   # uncomment for detailed separate log
-   Log::flush();  # Немедленно сбрасываем в файл
-   Log::write(FINGERPRINT::JA4::LOG, c$fp$ja4);
+  Log::flush(FINGERPRINT::JA4::LOG);  # Немедленно сбрасываем данные в лог для JA4
+  Log::write(FINGERPRINT::JA4::LOG, c$fp$ja4);  # Записываем данные в лог для JA4
 }
 
 event connection_state_remove(c: connection) {
