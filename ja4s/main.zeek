@@ -178,7 +178,8 @@ function do_ja4s(c: connection) {
   }
   c$fp$ja4s$done = T;
   
-  Log::flush();
+#Запись в отдельный фаил
+  Log::flush(FINGERPRINT::JA4S::LOG);
   Log::write(FINGERPRINT::JA4S::LOG, c$fp$ja4s);
 }
 
