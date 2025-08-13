@@ -177,8 +177,9 @@ function do_ja4s(c: connection) {
     @endif
   }
   c$fp$ja4s$done = T;
-
-  #Log::write(FINGERPRINT::JA4S::LOG, c$fp$ja4s);
+  
+  Log::flush();
+  Log::write(FINGERPRINT::JA4S::LOG, c$fp$ja4s);
 }
 
 event connection_state_remove(c: connection) {
