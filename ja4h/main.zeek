@@ -214,8 +214,8 @@ event http_message_done(c: connection, is_orig: bool, stat: http_message_stat)
     c$http$ja4h_r = c$fp$ja4h$ja4h_r;
     c$http$ja4h_ro = c$fp$ja4h$ja4h_ro;
     @endif
-# Немедленно сбрасываем в файл
-    Log::flush(FINGERPRINT::JA4H::LOG);
-    Log::write(FINGERPRINT::JA4H::LOG, c$fp$ja4h);
+
+
+    #Log::write(FINGERPRINT::JA4H::LOG, c$fp$ja4h);
 
 }
