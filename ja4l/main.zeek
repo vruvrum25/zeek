@@ -1,13 +1,11 @@
 # Copyright (c) 2024, FoxIO, LLC.
 # All rights reserved.
 # Licensed under FoxIO License 1.1
-# For full license text and more details, see the repo root https://github.com/FoxIO-LLC/ja4
+# For full license text and more details, see the repo root [https://github.com/FoxIO-LLC/ja4](https://github.com/FoxIO-LLC/ja4)
 # JA4+ by John Althouse
 # Zeek script by Jo Johnson
 # NOTE: JA4L can not work when traffic is out of order
-
 module FINGERPRINT::JA4L;
-
 export {
   # The fingerprint context and logging format
   type Info: record {
@@ -15,11 +13,13 @@ export {
     ts: time &log &optional;
     uid: string &log &optional;
     id: conn_id &log &optional;
-
     # The lightspeed fingerprints
     ja4l_c: string &log &default="";
     ja4l_s: string &log &default="";
-
+    # Flags for immediate output
+    ja4l_c_ready: bool &default=F;
+    ja4l_s_ready: bool &default=F;
+    ja4l_done: bool &default=F;
     # Timestamps for TCP
     syn: double &default = 0;   # A
     synack: double &default = 0; # B
@@ -27,30 +27,22 @@ export {
     client_hello: double &default=0; # D  
     server_hello: double &default=0; # E
     first_client_data: double &default=0; # F
-
     # Timestamps for QUIC
     client_init: double &default = 0;
     server_init: double &default = 0;
     client_handshake: double &default = 0;
     server_handshake: double &default = 0;
-
-
-
     ttl_c: count &default = 0;
     ttl_s: count &default = 0;
   };
-
   # Logging boilerplate
   redef enum Log::ID += { LOG };
   global log_fingerprint_ja4l: event(rec: Info);
   global log_policy: Log::PolicyHook;
-
 }
-
 redef record FINGERPRINT::Info += {
   ja4l: FINGERPRINT::JA4L::Info &default=Info();
 };
-
 redef record Conn::Info += {
     ja4l: string &log &default = "";
     ja4ls: string &log &default = "";
@@ -68,15 +60,26 @@ function get_current_packet_timestamp(): double {
     return cp$ts_sec * 1000000.0 + cp$ts_usec;
 }
 
-event new_connection(c: connection) {
+# Функция для немедленного формирования ja4l
+function do_ja4l(c: connection) {
+    if (!c?$fp || c$fp$ja4l$ja4l_done) { 
+        return; 
+    }
     
+    # Формируем ja4l если готовы компоненты
+    if (c$fp$ja4l$ja4l_c != "" || c$fp$ja4l$ja4l_s != "") {
+        c$conn$ja4l = c$fp$ja4l$ja4l_c;
+        c$fp$ja4l$ja4l_done = T;
+    }
+}
+
+event new_connection(c: connection) {
     if(!c?$fp) { c$fp = FINGERPRINT::Info(); }
     
     local rp = get_current_packet_header();
     if (rp?$tcp && rp$tcp$flags != TH_SYN) {
         return;  
     }
-
     c$fp$ja4l$syn = get_current_packet_timestamp();
     if (rp?$ip) {
         c$fp$ja4l$ttl_c = rp$ip$ttl;
@@ -85,7 +88,6 @@ event new_connection(c: connection) {
     } else {
         return;  
     }
-
     ConnThreshold::set_packets_threshold(c,1,F);
 }
 
@@ -99,6 +101,11 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
         c$fp$ja4l$uid = c$uid;
         c$fp$ja4l$ts = c$start_time;
         c$fp$ja4l$id = c$id;
+        c$fp$ja4l$ja4l_c_ready = T;
+        
+        # Формируем ja4l сразу после готовности
+        do_ja4l(c);
+        
     } else if (is_orig && c?$fp && c$fp$ja4l$server_hello != 0 && c$fp$ja4l$first_client_data == 0) {
         if (rp?$tcp && rp$tcp$dl == 0) {
             # wait for actual  data
@@ -108,6 +115,10 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
         c$fp$ja4l$first_client_data = get_current_packet_timestamp(); 
         c$fp$ja4l$ja4l_c += FINGERPRINT::delimiter;
         c$fp$ja4l$ja4l_c += cat(double_to_count( (c$fp$ja4l$first_client_data - c$fp$ja4l$server_hello) / 2.0));
+        
+        # Обновляем ja4l с SSL данными
+        do_ja4l(c);
+        
     } else if (threshold != 1) {
         return; 
     } else {
@@ -126,7 +137,7 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
         c$fp$ja4l$ja4l_s = cat(double_to_count((c$fp$ja4l$synack - c$fp$ja4l$syn) / 2.0 ));
         c$fp$ja4l$ja4l_s += FINGERPRINT::delimiter;
         c$fp$ja4l$ja4l_s += cat(c$fp$ja4l$ttl_s);
-
+        c$fp$ja4l$ja4l_s_ready = T;
         ConnThreshold::set_packets_threshold(c,c$orig$num_pkts + 1,T);  
     }
 }
@@ -157,9 +168,7 @@ event ssl_server_hello(c: connection, version: count, record_version: count, pos
 }
 
 event QUIC::initial_packet(c: connection, is_orig: bool, version: count, dcid: string, scid: string) {
-
     if(!c?$fp) { c$fp = FINGERPRINT::Info(); }
-
     local rp = get_current_packet_header();
     if (is_orig) {
         if (rp?$ip) {
@@ -185,6 +194,10 @@ event QUIC::initial_packet(c: connection, is_orig: bool, version: count, dcid: s
         c$fp$ja4l$ja4l_s += cat(c$fp$ja4l$ttl_s);
         c$fp$ja4l$ja4l_s += FINGERPRINT::delimiter;
         c$fp$ja4l$ja4l_s += "q";
+        c$fp$ja4l$ja4l_s_ready = T;
+        
+        # Формируем ja4l для QUIC
+        do_ja4l(c);
     }
 }
 
@@ -200,14 +213,26 @@ event QUIC::handshake_packet(c: connection, is_orig: bool, version: count, dcid:
         c$fp$ja4l$ja4l_c += cat(c$fp$ja4l$ttl_c);
         c$fp$ja4l$ja4l_c += FINGERPRINT::delimiter;
         c$fp$ja4l$ja4l_c += "q";
-    } else {
-            c$fp$ja4l$server_handshake = get_current_packet_timestamp();
+        c$fp$ja4l$ja4l_c_ready = T;
         
+        # Формируем ja4l для QUIC клиента
+        do_ja4l(c);
+    } else {
+        c$fp$ja4l$server_handshake = get_current_packet_timestamp();
     }
+}
 
+# Hook для немедленного вывода ja4l в conn.log
+hook Conn::log_policy(rec: Conn::Info, id: Log::ID, filter: Log::Filter) {
+    if(connection_exists(rec$id)) {
+        local c = lookup_connection(rec$id);
+        do_ja4l(c);
+    }
 }
 
 event connection_state_remove(c: connection) {
-        c$conn$ja4l =  c$fp$ja4l$ja4l_c;
+    # ja4l уже выведен через hook, здесь только ja4ls
+    if (c?$fp) {
         c$conn$ja4ls = c$fp$ja4l$ja4l_s;
+    }
 }
