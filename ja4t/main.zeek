@@ -7,37 +7,60 @@
 module FINGERPRINT::JA4T;
 @load ../config
 @load ../utils/common
+
 export {
     # TODO: It would be nice to make this on par wtih the tcp_options event
-  type TCP_Options: record {
-      option_kinds: vector of count &default=vector();
-      max_segment_size: count &default=0;
-      window_scale: count &default=0;
-  };
-  # The fingerprint context 
-  type Info: record {
-    syn_window_size: count &default=0;
-    syn_opts: TCP_Options &default=TCP_Options();    
-    synack_window_size: count &default=0;
-    synack_opts: TCP_Options &default=TCP_Options();
-    synack_delays: vector of count &default=vector();
-    synack_done: bool &default=F;
-    ja4t_done: bool &default=F;  # Флаг для предотвращения повторного формирования ja4t
-    last_ts: double &default=0;
-    rst_ts: double &default=0;
-  };
+    type TCP_Options: record {
+        option_kinds: vector of count &default=vector();
+        max_segment_size: count &default=0;
+        window_scale: count &default=0;
+    };
+    
+    # The fingerprint context 
+    type Info: record {
+        syn_window_size: count &default=0;
+        syn_opts: TCP_Options &default=TCP_Options();    
+        synack_window_size: count &default=0;
+        synack_opts: TCP_Options &default=TCP_Options();
+        synack_delays: vector of count &default=vector();
+        synack_done: bool &default=F;
+        ja4t_done: bool &default=F;
+        last_ts: double &default=0;
+        rst_ts: double &default=0;
+    };
+    
+    # Отдельный лог для быстрого JA4T
+    type FastJA4T: record {
+        ts: time &log;
+        uid: string &log;
+        id: conn_id &log;
+        ja4t: string &log;
+    };
+    
+    redef enum Log::ID += { FAST_LOG };
+    global log_fast_ja4t: event(rec: FastJA4T);
+    global fast_log_policy: Log::PolicyHook;
 }
+
 redef record FINGERPRINT::Info += {
-  ja4t: FINGERPRINT::JA4T::Info &default= Info();
+    ja4t: FINGERPRINT::JA4T::Info &default= Info();
 };
+
 redef record Conn::Info += {
     ja4t: string &log &default = "";
 };
+
 @if(FINGERPRINT::JA4TS_enabled)
 redef record Conn::Info += {
     ja4ts: string &log &default = "";
 };
 @endif
+
+# Create the fast log stream
+event zeek_init() &priority=5 {
+    Log::create_stream(FINGERPRINT::JA4T::FAST_LOG,
+        [$columns=FastJA4T, $ev=log_fast_ja4t, $path="ja4t_fast", $policy=fast_log_policy]);
+}
 
 function get_current_packet_timestamp(): double {
     local cp = get_current_packet();
@@ -101,21 +124,27 @@ function get_tcp_options(): TCP_Options {
     return opts;
 }
 
-# Функция для немедленного формирования ja4t
-function do_ja4t(c: connection) {
+# Функция для немедленного формирования ja4t и записи в быстрый лог
+function do_ja4t_fast(c: connection) {
     if (!c?$fp || c$fp$ja4t$ja4t_done || c$fp$ja4t$syn_window_size == 0) { 
         return; 
     }
     
     # Формируем ja4t сразу на основе SYN пакета
-    c$conn$ja4t = fmt("%d", c$fp$ja4t$syn_window_size);
-    c$conn$ja4t += FINGERPRINT::delimiter;
-    c$conn$ja4t += FINGERPRINT::vector_of_count_to_str(c$fp$ja4t$syn_opts$option_kinds, "%d", "-");
-    c$conn$ja4t += FINGERPRINT::delimiter;
-    c$conn$ja4t += fmt("%d", c$fp$ja4t$syn_opts$max_segment_size);
-    c$conn$ja4t += FINGERPRINT::delimiter;
-    c$conn$ja4t += fmt("%d", c$fp$ja4t$syn_opts$window_scale);
+    local ja4t_value = fmt("%d", c$fp$ja4t$syn_window_size);
+    ja4t_value += FINGERPRINT::delimiter;
+    ja4t_value += FINGERPRINT::vector_of_count_to_str(c$fp$ja4t$syn_opts$option_kinds, "%d", "-");
+    ja4t_value += FINGERPRINT::delimiter;
+    ja4t_value += fmt("%d", c$fp$ja4t$syn_opts$max_segment_size);
+    ja4t_value += FINGERPRINT::delimiter;
+    ja4t_value += fmt("%d", c$fp$ja4t$syn_opts$window_scale);
     
+    # СРАЗУ записываем в отдельный быстрый лог
+    local fast_record = FastJA4T($ts=network_time(), $uid=c$uid, $id=c$id, $ja4t=ja4t_value);
+    Log::write(FINGERPRINT::JA4T::FAST_LOG, fast_record);
+    
+    # Также записываем в conn для совместимости
+    c$conn$ja4t = ja4t_value;
     c$fp$ja4t$ja4t_done = T;
 }
 
@@ -130,8 +159,8 @@ event new_connection(c: connection) {
     c$fp$ja4t$syn_opts = get_tcp_options();
     c$fp$ja4t$last_ts = get_current_packet_timestamp();
     
-    # Формируем ja4t сразу после SYN
-    do_ja4t(c);
+    # Формируем ja4t сразу после SYN и записываем в быстрый лог
+    do_ja4t_fast(c);
     
     ConnThreshold::set_packets_threshold(c,1,F);  # start monitoring synacks
     ConnThreshold::set_packets_threshold(c,2,T);  # Shut down ja4TS on next orig packet
@@ -183,16 +212,8 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
     @endif
 }
 
-# Hook для немедленного вывода ja4t в conn.log (аналогично SSL::log_policy в ja4s)
-hook Conn::log_policy(rec: Conn::Info, id: Log::ID, filter: Log::Filter) {
-    if(connection_exists(rec$id)) {
-        local c = lookup_connection(rec$id);
-        do_ja4t(c);
-    }
-}
-
 event connection_state_remove(c: connection) {
-    # ja4t уже выведен через hook, здесь только ja4ts
+    # ja4t уже выведен в быстрый лог, здесь только ja4ts в conn.log
     @if(FINGERPRINT::JA4TS_enabled) 
     if(c?$fp && c$fp$ja4t$synack_window_size > 0) {
         c$conn$ja4ts = fmt("%d", c$fp$ja4t$synack_window_size);
