@@ -25,8 +25,10 @@ export {
         synack_delays: vector of count &default=vector();
         synack_done: bool &default=F;
         ja4t_done: bool &default=F;
+        ja4ts_done: bool &default=F;  # Флаг для предотвращения дублирования JA4TS
         last_ts: double &default=0;
         rst_ts: double &default=0;
+        first_synack_ts: double &default=0;  # Время первого SYN-ACK
     };
     
     # Отдельный лог для быстрого JA4T
@@ -37,9 +39,21 @@ export {
         ja4t: string &log;
     };
     
-    redef enum Log::ID += { FAST_LOG };
+    # Отдельный лог для умного JA4TS (один раз)
+    type SmartJA4TS: record {
+        ts: time &log;
+        uid: string &log;
+        id: conn_id &log;
+        ja4ts: string &log;
+        delays_count: count &log;
+        export_reason: string &log;  # Причина экспорта
+    };
+    
+    redef enum Log::ID += { FAST_LOG, SMART_TS_LOG };
     global log_fast_ja4t: event(rec: FastJA4T);
+    global log_smart_ja4ts: event(rec: SmartJA4TS);
     global fast_log_policy: Log::PolicyHook;
+    global smart_ts_log_policy: Log::PolicyHook;
 }
 
 redef record FINGERPRINT::Info += {
@@ -56,10 +70,15 @@ redef record Conn::Info += {
 };
 @endif
 
-# Create the fast log stream
+# Create the fast log streams
 event zeek_init() &priority=5 {
     Log::create_stream(FINGERPRINT::JA4T::FAST_LOG,
         [$columns=FastJA4T, $ev=log_fast_ja4t, $path="ja4t_fast", $policy=fast_log_policy]);
+    
+    @if(FINGERPRINT::JA4TS_enabled)
+    Log::create_stream(FINGERPRINT::JA4T::SMART_TS_LOG,
+        [$columns=SmartJA4TS, $ev=log_smart_ja4ts, $path="ja4ts_smart", $policy=smart_ts_log_policy]);
+    @endif
 }
 
 function get_current_packet_timestamp(): double {
@@ -146,7 +165,81 @@ function do_ja4t_fast(c: connection) {
     # Также записываем в conn для совместимости
     c$conn$ja4t = ja4t_value;
     c$fp$ja4t$ja4t_done = T;
+    
+    print fmt("JA4T recorded: %s", c$uid);
 }
+
+# Умная функция для формирования ja4ts - записывается ТОЛЬКО ОДИН РАЗ
+@if(FINGERPRINT::JA4TS_enabled)
+function do_ja4ts_smart(c: connection) {
+    if (!c?$fp || c$fp$ja4t$ja4ts_done || c$fp$ja4t$synack_window_size == 0) {
+        return;
+    }
+    
+    # Определяем, стоит ли записывать JA4TS сейчас
+    local should_write = F;
+    local reason = "";
+    local now = get_current_packet_timestamp();
+    
+    # Условия для записи JA4TS:
+    if (|c$fp$ja4t$synack_delays| >= 3) {
+        # 1. Собрали достаточно задержек (≥3)
+        should_write = T;
+        reason = "enough_delays";
+    } else if (c$fp$ja4t$synack_done) {
+        # 2. Соединение закрывается
+        should_write = T;
+        reason = "connection_closing";
+    } else if (c$fp$ja4t$rst_ts > 0) {
+        # 3. RST пакет получен
+        should_write = T;
+        reason = "rst_received";
+    } else if (c$fp$ja4t$first_synack_ts > 0 && (now - c$fp$ja4t$first_synack_ts) > 2000000) {
+        # 4. Прошло >2 секунд с первого SYN-ACK
+        should_write = T;
+        reason = "timeout_2sec";
+    } else if (|c$fp$ja4t$synack_delays| >= 1 && (now - c$fp$ja4t$last_ts) > 1000000) {
+        # 5. Есть хотя бы 1 задержка и прошла 1 секунда с последнего пакета
+        should_write = T;
+        reason = "timeout_1sec";
+    }
+    
+    if (!should_write) {
+        return;
+    }
+    
+    # Формируем ja4ts ОДИН РАЗ
+    local ja4ts_value = fmt("%d", c$fp$ja4t$synack_window_size);
+    ja4ts_value += FINGERPRINT::delimiter;
+    ja4ts_value += FINGERPRINT::vector_of_count_to_str(c$fp$ja4t$synack_opts$option_kinds, "%d", "-");
+    ja4ts_value += FINGERPRINT::delimiter;
+    ja4ts_value += fmt("%d", c$fp$ja4t$synack_opts$max_segment_size);
+    ja4ts_value += FINGERPRINT::delimiter;
+    ja4ts_value += fmt("%d", c$fp$ja4t$synack_opts$window_scale);
+    
+    # Добавляем задержки если есть
+    if (|c$fp$ja4t$synack_delays| > 0) {
+        ja4ts_value += FINGERPRINT::delimiter;
+        ja4ts_value += FINGERPRINT::vector_of_count_to_str(c$fp$ja4t$synack_delays, "%d", "-");
+        if (c$fp$ja4t$rst_ts > 0) {
+            ja4ts_value += fmt("-R%d", double_to_count(c$fp$ja4t$rst_ts - c$fp$ja4t$last_ts)/1000000);
+        }
+    }
+    
+    # ЗАПИСЫВАЕМ ТОЛЬКО ОДИН РАЗ в умный лог
+    local smart_ts_record = SmartJA4TS($ts=network_time(), $uid=c$uid, $id=c$id, 
+                                       $ja4ts=ja4ts_value, $delays_count=|c$fp$ja4t$synack_delays|,
+                                       $export_reason=reason);
+    Log::write(FINGERPRINT::JA4T::SMART_TS_LOG, smart_ts_record);
+    
+    # Также записываем в conn для совместимости
+    c$conn$ja4ts = ja4ts_value;
+    c$fp$ja4t$ja4ts_done = T;  # ВАЖНО: помечаем как обработанный
+    
+    print fmt("JA4TS recorded ONCE: %s, reason: %s, delays: %d", 
+              c$uid, reason, |c$fp$ja4t$synack_delays|);
+}
+@endif
 
 event new_connection(c: connection) {
     local rph = get_current_packet_header();
@@ -172,6 +265,10 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
     if(is_orig) {
         if(c?$fp) {
             c$fp$ja4t$synack_done = T;
+            # Последняя попытка записать JA4TS при закрытии
+            @if(FINGERPRINT::JA4TS_enabled)
+            do_ja4ts_smart(c);
+            @endif
         }
         return;
     }
@@ -186,12 +283,18 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
     local ts = get_current_packet_timestamp();
     if (ts - c$fp$ja4t$last_ts > 120000000) { # Timeout.  
         c$fp$ja4t$synack_done = T;
+        @if(FINGERPRINT::JA4TS_enabled)
+        do_ja4ts_smart(c);
+        @endif
         return;
     } 
     if (rph$tcp$flags & TH_RST != 0) {
         c$fp$ja4t$rst_ts = ts;
         c$fp$ja4t$synack_done = T;
-        return;   # We'll handle tacking this on when we calculate 
+        @if(FINGERPRINT::JA4TS_enabled)
+        do_ja4ts_smart(c);
+        @endif
+        return;
     } else if (rph$tcp$flags == (TH_SYN | TH_ACK)) {
     } else {
         return;
@@ -199,12 +302,26 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
     if (threshold == 1) {  # first synack
         c$fp$ja4t$synack_window_size = rph$tcp$win;
         c$fp$ja4t$synack_opts = get_tcp_options();
+        c$fp$ja4t$first_synack_ts = ts;  # Запоминаем время первого SYN-ACK
+        # НЕ записываем JA4TS сразу - ждем больше данных
     } else {
+        # Записываем задержку
         c$fp$ja4t$synack_delays += double_to_count(ts - c$fp$ja4t$last_ts)/1000000;
+        # Проверяем, стоит ли записать JA4TS сейчас
+        @if(FINGERPRINT::JA4TS_enabled)
+        do_ja4ts_smart(c);
+        @endif
     }
     c$fp$ja4t$last_ts = ts;
     
     if (|c$fp$ja4t$synack_delays| == 10) {
+        # Достигли максимума задержек - финальная запись
+        @if(FINGERPRINT::JA4TS_enabled)
+        if (!c$fp$ja4t$ja4ts_done) {
+            c$fp$ja4t$synack_done = T;
+            do_ja4ts_smart(c);
+        }
+        @endif
         return;
     } 
     @if(FINGERPRINT::JA4TS_enabled) 
@@ -213,23 +330,11 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
 }
 
 event connection_state_remove(c: connection) {
-    # ja4t уже выведен в быстрый лог, здесь только ja4ts в conn.log
+    # Оба отпечатка уже выведены в быстрые логи
+    # Последняя попытка для JA4TS если не записан
     @if(FINGERPRINT::JA4TS_enabled) 
-    if(c?$fp && c$fp$ja4t$synack_window_size > 0) {
-        c$conn$ja4ts = fmt("%d", c$fp$ja4t$synack_window_size);
-        c$conn$ja4ts += FINGERPRINT::delimiter;
-        c$conn$ja4ts += FINGERPRINT::vector_of_count_to_str(c$fp$ja4t$synack_opts$option_kinds, "%d", "-");
-        c$conn$ja4ts += FINGERPRINT::delimiter;
-        c$conn$ja4ts += fmt("%d", c$fp$ja4t$synack_opts$max_segment_size);
-        c$conn$ja4ts += FINGERPRINT::delimiter;
-        c$conn$ja4ts += fmt("%d", c$fp$ja4t$synack_opts$window_scale);
-        if(|c$fp$ja4t$synack_delays| > 0) {
-            c$conn$ja4ts += FINGERPRINT::delimiter;
-            c$conn$ja4ts += FINGERPRINT::vector_of_count_to_str(c$fp$ja4t$synack_delays, "%d", "-");
-            if(c$fp$ja4t$rst_ts > 0) {
-                c$conn$ja4ts += fmt("-R%d", double_to_count(c$fp$ja4t$rst_ts - c$fp$ja4t$last_ts)/1000000);
-            }   
-        }
+    if (c?$fp && !c$fp$ja4t$ja4ts_done && c$fp$ja4t$synack_window_size > 0) {
+        do_ja4ts_smart(c);
     }
     @endif
 }
