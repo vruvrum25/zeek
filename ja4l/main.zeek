@@ -6,53 +6,69 @@
 # Zeek script by Jo Johnson
 # NOTE: JA4L can not work when traffic is out of order
 module FINGERPRINT::JA4L;
+
 export {
-  # The fingerprint context and logging format
-  type Info: record {
-    # The connection uid which this fingerprint represents
-    ts: time &log &optional;
-    uid: string &log &optional;
-    id: conn_id &log &optional;
-    # The lightspeed fingerprints
-    ja4l_c: string &log &default="";
-    ja4l_s: string &log &default="";
-    # Flags for immediate output
-    ja4l_c_ready: bool &default=F;
-    ja4l_s_ready: bool &default=F;
-    ja4l_done: bool &default=F;
-    # Timestamps for TCP
-    syn: double &default = 0;   # A
-    synack: double &default = 0; # B
-    ack: double &default = 0;  # C
-    client_hello: double &default=0; # D  
-    server_hello: double &default=0; # E
-    first_client_data: double &default=0; # F
-    # Timestamps for QUIC
-    client_init: double &default = 0;
-    server_init: double &default = 0;
-    client_handshake: double &default = 0;
-    server_handshake: double &default = 0;
-    ttl_c: count &default = 0;
-    ttl_s: count &default = 0;
-  };
-  # Logging boilerplate
-  redef enum Log::ID += { LOG };
-  global log_fingerprint_ja4l: event(rec: Info);
-  global log_policy: Log::PolicyHook;
+    # The fingerprint context and logging format
+    type Info: record {
+        # The connection uid which this fingerprint represents
+        ts: time &log &optional;
+        uid: string &log &optional;
+        id: conn_id &log &optional;
+        # The lightspeed fingerprints
+        ja4l_c: string &log &default="";
+        ja4l_s: string &log &default="";
+        # Flags for immediate output
+        ja4l_c_ready: bool &default=F;
+        ja4l_s_ready: bool &default=F;
+        ja4l_done: bool &default=F;
+        # Timestamps for TCP
+        syn: double &default = 0;   # A
+        synack: double &default = 0; # B
+        ack: double &default = 0;  # C
+        client_hello: double &default=0; # D  
+        server_hello: double &default=0; # E
+        first_client_data: double &default=0; # F
+        # Timestamps for QUIC
+        client_init: double &default = 0;
+        server_init: double &default = 0;
+        client_handshake: double &default = 0;
+        server_handshake: double &default = 0;
+        ttl_c: count &default = 0;
+        ttl_s: count &default = 0;
+    };
+    
+    # Отдельный лог для быстрого JA4L
+    type FastJA4L: record {
+        ts: time &log;
+        uid: string &log;
+        id: conn_id &log;
+        ja4l: string &log;
+    };
+    
+    # Logging boilerplate
+    redef enum Log::ID += { LOG, FAST_LOG };
+    global log_fingerprint_ja4l: event(rec: Info);
+    global log_fast_ja4l: event(rec: FastJA4L);
+    global log_policy: Log::PolicyHook;
+    global fast_log_policy: Log::PolicyHook;
 }
+
 redef record FINGERPRINT::Info += {
-  ja4l: FINGERPRINT::JA4L::Info &default=Info();
+    ja4l: FINGERPRINT::JA4L::Info &default=Info();
 };
+
 redef record Conn::Info += {
     ja4l: string &log &default = "";
     ja4ls: string &log &default = "";
 };
 
-# Create the log stream and file
+# Create the log streams
 event zeek_init() &priority=5 {
-  Log::create_stream(FINGERPRINT::JA4L::LOG,
-    [$columns=FINGERPRINT::JA4L::Info, $ev=log_fingerprint_ja4l, $path="fingerprint_ja4l", $policy=log_policy]
-  );
+    Log::create_stream(FINGERPRINT::JA4L::LOG,
+        [$columns=FINGERPRINT::JA4L::Info, $ev=log_fingerprint_ja4l, $path="fingerprint_ja4l", $policy=log_policy]);
+    
+    Log::create_stream(FINGERPRINT::JA4L::FAST_LOG,
+        [$columns=FastJA4L, $ev=log_fast_ja4l, $path="ja4l_fast", $policy=fast_log_policy]);
 }
 
 function get_current_packet_timestamp(): double {
@@ -60,14 +76,19 @@ function get_current_packet_timestamp(): double {
     return cp$ts_sec * 1000000.0 + cp$ts_usec;
 }
 
-# Функция для немедленного формирования ja4l
-function do_ja4l(c: connection) {
+# Функция для немедленного формирования ja4l и записи в быстрый лог
+function do_ja4l_fast(c: connection) {
     if (!c?$fp || c$fp$ja4l$ja4l_done) { 
         return; 
     }
     
     # Формируем ja4l если готовы компоненты
-    if (c$fp$ja4l$ja4l_c != "" || c$fp$ja4l$ja4l_s != "") {
+    if (c$fp$ja4l$ja4l_c != "") {
+        # СРАЗУ записываем в отдельный быстрый лог
+        local fast_record = FastJA4L($ts=network_time(), $uid=c$uid, $id=c$id, $ja4l=c$fp$ja4l$ja4l_c);
+        Log::write(FINGERPRINT::JA4L::FAST_LOG, fast_record);
+        
+        # Также записываем в conn для совместимости
         c$conn$ja4l = c$fp$ja4l$ja4l_c;
         c$fp$ja4l$ja4l_done = T;
     }
@@ -103,8 +124,8 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
         c$fp$ja4l$id = c$id;
         c$fp$ja4l$ja4l_c_ready = T;
         
-        # Формируем ja4l сразу после готовности
-        do_ja4l(c);
+        # Формируем ja4l сразу после готовности и записываем в быстрый лог
+        do_ja4l_fast(c);
         
     } else if (is_orig && c?$fp && c$fp$ja4l$server_hello != 0 && c$fp$ja4l$first_client_data == 0) {
         if (rp?$tcp && rp$tcp$dl == 0) {
@@ -116,8 +137,8 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
         c$fp$ja4l$ja4l_c += FINGERPRINT::delimiter;
         c$fp$ja4l$ja4l_c += cat(double_to_count( (c$fp$ja4l$first_client_data - c$fp$ja4l$server_hello) / 2.0));
         
-        # Обновляем ja4l с SSL данными
-        do_ja4l(c);
+        # Обновляем ja4l с SSL данными и записываем в быстрый лог
+        do_ja4l_fast(c);
         
     } else if (threshold != 1) {
         return; 
@@ -195,9 +216,6 @@ event QUIC::initial_packet(c: connection, is_orig: bool, version: count, dcid: s
         c$fp$ja4l$ja4l_s += FINGERPRINT::delimiter;
         c$fp$ja4l$ja4l_s += "q";
         c$fp$ja4l$ja4l_s_ready = T;
-        
-        # Формируем ja4l для QUIC
-        do_ja4l(c);
     }
 }
 
@@ -215,23 +233,15 @@ event QUIC::handshake_packet(c: connection, is_orig: bool, version: count, dcid:
         c$fp$ja4l$ja4l_c += "q";
         c$fp$ja4l$ja4l_c_ready = T;
         
-        # Формируем ja4l для QUIC клиента
-        do_ja4l(c);
+        # Формируем ja4l для QUIC клиента и записываем в быстрый лог
+        do_ja4l_fast(c);
     } else {
         c$fp$ja4l$server_handshake = get_current_packet_timestamp();
     }
 }
 
-# Hook для немедленного вывода ja4l в conn.log
-hook Conn::log_policy(rec: Conn::Info, id: Log::ID, filter: Log::Filter) {
-    if(connection_exists(rec$id)) {
-        local c = lookup_connection(rec$id);
-        do_ja4l(c);
-    }
-}
-
 event connection_state_remove(c: connection) {
-    # ja4l уже выведен через hook, здесь только ja4ls
+    # ja4l уже выведен в быстрый лог, здесь только ja4ls в conn.log
     if (c?$fp) {
         c$conn$ja4ls = c$fp$ja4l$ja4l_s;
     }
