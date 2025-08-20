@@ -1,5 +1,5 @@
 # Copyright (c) 2024, FoxIO, LLC.
-# Simplified JA4T - fast output, no backup logs
+# Simplified JA4T - fast output with logging
 
 module FINGERPRINT::JA4T;
 @load ../config
@@ -22,16 +22,37 @@ export {
         last_ts: double &default=0;
         rst_ts: double &default=0;
     };
+    
+    # Новый тип для логирования
+    type LogInfo: record {
+        uid: string &log &optional;
+        ja4t: string &log &default="";
+        ja4ts: string &log &default=""; 
+        done: bool &default=F;
+    };
+    
+    # Логирование
+    redef enum Log::ID += { LOG };
+    global log_fingerprint_ja4t: event(rec: LogInfo);
+    global log_policy: Log::PolicyHook;
 }
 
 redef record FINGERPRINT::Info += {
-    ja4t: FINGERPRINT::JA4T::Info &default= Info();
+    ja4t: FINGERPRINT::JA4T::Info &default=Info();
+    ja4t_log: FINGERPRINT::JA4T::LogInfo &default=LogInfo();
 };
 
 redef record Conn::Info += {
     ja4t: string &log &default = "";
     ja4ts: string &log &default = "";
 };
+
+# Создание лог стрима
+event zeek_init() &priority=5 {
+    Log::create_stream(FINGERPRINT::JA4T::LOG,
+        [$columns=FINGERPRINT::JA4T::LogInfo, $ev=log_fingerprint_ja4t, $path="fingerprint_ja4t", $policy=log_policy]
+    );
+}
 
 function get_current_packet_timestamp(): double {
     local cp = get_current_packet();
@@ -95,7 +116,7 @@ function get_tcp_options(): TCP_Options {
     return opts;
 }
 
-# Быстрое формирование JA4T сразу после SYN
+# Быстрое формирование JA4T сразу после SYN с логированием
 function do_ja4t_fast(c: connection) {
     if (c$fp$ja4t$syn_window_size > 0 && c$conn$ja4t == "") {
         c$conn$ja4t = fmt("%d", c$fp$ja4t$syn_window_size);
@@ -107,10 +128,15 @@ function do_ja4t_fast(c: connection) {
         c$conn$ja4t += fmt("%d", c$fp$ja4t$syn_opts$window_scale);
         
         print fmt("JA4T: %s = %s", c$uid, c$conn$ja4t);
+        
+        # Логирование вместо Redis
+        c$fp$ja4t_log$uid = c$uid;
+        c$fp$ja4t_log$ja4t = c$conn$ja4t;
+        Log::write(FINGERPRINT::JA4T::LOG, c$fp$ja4t_log);
     }
 }
 
-# Быстрое формирование JA4TS
+# Быстрое формирование JA4TS с логированием
 function do_ja4ts_fast(c: connection) {
     if (c$fp$ja4t$synack_window_size > 0 && c$conn$ja4ts == "") {
         c$conn$ja4ts = fmt("%d", c$fp$ja4t$synack_window_size);
@@ -131,6 +157,11 @@ function do_ja4ts_fast(c: connection) {
         }
         
         print fmt("JA4TS: %s = %s", c$uid, c$conn$ja4ts);
+        
+        # Логирование вместо Redis  
+        c$fp$ja4t_log$uid = c$uid;
+        c$fp$ja4t_log$ja4ts = c$conn$ja4ts;
+        Log::write(FINGERPRINT::JA4T::LOG, c$fp$ja4t_log);
     }
 }
 
