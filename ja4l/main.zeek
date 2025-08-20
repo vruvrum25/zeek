@@ -71,7 +71,7 @@ function is_ja4ls_complete(fingerprint: string): bool {
 
 # Быстрое формирование JA4L - ТОЛЬКО ПОЛНЫЙ
 function do_ja4l_fast(c: connection) {
-    if (c$fp$ja4l$ack > 0 && c$conn$ja4l == "") {
+    if (c$fp$ja4l$ack > 0) {  # Убрали условие c$conn$ja4l == ""
         c$conn$ja4l = cat(double_to_count((c$fp$ja4l$ack - c$fp$ja4l$synack) / 2.0));
         c$conn$ja4l += FINGERPRINT::delimiter;
         c$conn$ja4l += cat(c$fp$ja4l$ttl_c);
@@ -82,7 +82,7 @@ function do_ja4l_fast(c: connection) {
             c$conn$ja4l += cat(double_to_count((c$fp$ja4l$first_client_data - c$fp$ja4l$server_hello) / 2.0));
         }
         
-        # ВЫВОДИМ ТОЛЬКО ПОЛНЫЙ ОТПЕЧАТОК
+        # ВЫВОДИМ ТОЛЬКО ПОЛНЫЙ ОТПЕЧАТОК (3 части)
         if (is_ja4l_complete(c$conn$ja4l)) {
             print fmt("JA4L: %s = %s", c$uid, c$conn$ja4l);
             
@@ -97,7 +97,7 @@ function do_ja4l_fast(c: connection) {
 
 # Быстрое формирование JA4LS - ТОЛЬКО ПОЛНЫЙ  
 function do_ja4ls_fast(c: connection) {
-    if (c$fp$ja4l$synack > 0 && c$conn$ja4ls == "") {
+    if (c$fp$ja4l$synack > 0) {  # Убрали условие c$conn$ja4ls == ""
         c$conn$ja4ls = cat(double_to_count((c$fp$ja4l$synack - c$fp$ja4l$syn) / 2.0));
         c$conn$ja4ls += FINGERPRINT::delimiter;
         c$conn$ja4ls += cat(c$fp$ja4l$ttl_s);
@@ -108,7 +108,7 @@ function do_ja4ls_fast(c: connection) {
             c$conn$ja4ls += cat(double_to_count((c$fp$ja4l$server_hello - c$fp$ja4l$client_hello) / 2.0));
         }
         
-        # ВЫВОДИМ ТОЛЬКО ПОЛНЫЙ ОТПЕЧАТОК
+        # ВЫВОДИМ ТОЛЬКО ПОЛНЫЙ ОТПЕЧАТОК (3 части)
         if (is_ja4ls_complete(c$conn$ja4ls)) {
             print fmt("JA4LS: %s = %s", c$uid, c$conn$ja4ls);
             
@@ -143,7 +143,9 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
     local rp = get_current_packet_header();
     if (is_orig && threshold == 2) {
         c$fp$ja4l$ack = get_current_packet_timestamp();
-        # НЕ вызываем do_ja4l_fast здесь - ждем SSL данные
+        
+        # ДОБАВИТЬ: Принудительный вызов JA4L после ACK
+        do_ja4l_fast(c);  # ← ДОБАВЛЕНО для моментального вывода
         
     } else if (is_orig && c?$fp && c$fp$ja4l$server_hello != 0 && c$fp$ja4l$first_client_data == 0) {
         if (rp?$tcp && rp$tcp$dl == 0) {
@@ -151,8 +153,7 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
             return;
         }
         c$fp$ja4l$first_client_data = get_current_packet_timestamp(); 
-        # Теперь формируем ПОЛНЫЙ JA4L
-        c$conn$ja4l = ""; # Сбрасываем для пересчета с SSL
+        # Теперь формируем ПОЛНЫЙ JA4L с SSL данными
         do_ja4l_fast(c);
         
     } else if (threshold == 1) {
@@ -167,7 +168,6 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
         } else {
             return;
         }
-        # НЕ вызываем do_ja4ls_fast здесь - ждем SSL данные
         
         ConnThreshold::set_packets_threshold(c,c$orig$num_pkts + 1,T);  
     }
@@ -190,8 +190,7 @@ event ssl_server_hello(c: connection, version: count, record_version: count, pos
     }
     if (c?$fp && c$fp$ja4l$server_hello == 0) {
         c$fp$ja4l$server_hello = get_current_packet_timestamp();
-        # Теперь формируем ПОЛНЫЙ JA4LS
-        c$conn$ja4ls = ""; # Сбрасываем для пересчета с SSL
+        # Теперь формируем ПОЛНЫЙ JA4LS с SSL данными
         do_ja4ls_fast(c);
         
         ConnThreshold::set_packets_threshold(c,c$orig$num_pkts + 1,T);
