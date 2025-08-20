@@ -55,17 +55,17 @@ function get_current_packet_timestamp(): double {
     return cp$ts_sec * 1000000.0 + cp$ts_usec;
 }
 
-# Проверка полноты JA4L (должно быть 3 части)
+# Проверка полноты JA4L (должно быть 3 части) - ИСПРАВЛЕНО
 function is_ja4l_complete(fingerprint: string): bool {
     if (fingerprint == "") return F;
-    local parts = split_string(fingerprint, FINGERPRINT::delimiter);
+    local parts = split_string(fingerprint, /_/);  # Используем pattern вместо string
     return |parts| >= 3;  # Полный JA4L имеет минимум 3 части
 }
 
-# Проверка полноты JA4LS (должно быть 3 части)  
+# Проверка полноты JA4LS (должно быть 3 части) - ИСПРАВЛЕНО  
 function is_ja4ls_complete(fingerprint: string): bool {
     if (fingerprint == "") return F;
-    local parts = split_string(fingerprint, FINGERPRINT::delimiter);
+    local parts = split_string(fingerprint, /_/);  # Используем pattern вместо string
     return |parts| >= 3;  # Полный JA4LS имеет минимум 3 части
 }
 
