@@ -1,5 +1,5 @@
 # Copyright (c) 2024, FoxIO, LLC. 
-# Simplified JA4L - fast output, no backup logs
+# Simplified JA4L - fast output with instant logging
 
 module FINGERPRINT::JA4L;
 
@@ -20,6 +20,18 @@ export {
         ttl_c: count &default = 0;
         ttl_s: count &default = 0;
     };
+    
+    # Структура для моментального логирования
+    type LogInfo: record {
+        uid: string &log &optional;
+        ja4l: string &log &default="";
+        ja4ls: string &log &default="";
+    };
+    
+    # Логирование
+    redef enum Log::ID += { LOG };
+    global log_fingerprint_ja4l: event(rec: LogInfo);
+    global log_policy: Log::PolicyHook;
 }
 
 redef record FINGERPRINT::Info += {
@@ -31,12 +43,33 @@ redef record Conn::Info += {
     ja4ls: string &log &default = "";
 };
 
+# Создание лог стрима
+event zeek_init() &priority=5 {
+    Log::create_stream(FINGERPRINT::JA4L::LOG,
+        [$columns=FINGERPRINT::JA4L::LogInfo, $ev=log_fingerprint_ja4l, $path="fingerprint_ja4l", $policy=log_policy]
+    );
+}
+
 function get_current_packet_timestamp(): double {
     local cp = get_current_packet();
     return cp$ts_sec * 1000000.0 + cp$ts_usec;
 }
 
-# Быстрое формирование JA4L
+# Проверка полноты JA4L (должно быть 3 части)
+function is_ja4l_complete(fingerprint: string): bool {
+    if (fingerprint == "") return F;
+    local parts = split_string(fingerprint, FINGERPRINT::delimiter);
+    return |parts| >= 3;  # Полный JA4L имеет минимум 3 части
+}
+
+# Проверка полноты JA4LS (должно быть 3 части)  
+function is_ja4ls_complete(fingerprint: string): bool {
+    if (fingerprint == "") return F;
+    local parts = split_string(fingerprint, FINGERPRINT::delimiter);
+    return |parts| >= 3;  # Полный JA4LS имеет минимум 3 части
+}
+
+# Быстрое формирование JA4L - ТОЛЬКО ПОЛНЫЙ
 function do_ja4l_fast(c: connection) {
     if (c$fp$ja4l$ack > 0 && c$conn$ja4l == "") {
         c$conn$ja4l = cat(double_to_count((c$fp$ja4l$ack - c$fp$ja4l$synack) / 2.0));
@@ -49,11 +82,20 @@ function do_ja4l_fast(c: connection) {
             c$conn$ja4l += cat(double_to_count((c$fp$ja4l$first_client_data - c$fp$ja4l$server_hello) / 2.0));
         }
         
-        print fmt("JA4L: %s = %s", c$uid, c$conn$ja4l);
+        # ВЫВОДИМ ТОЛЬКО ПОЛНЫЙ ОТПЕЧАТОК
+        if (is_ja4l_complete(c$conn$ja4l)) {
+            print fmt("JA4L: %s = %s", c$uid, c$conn$ja4l);
+            
+            # МОМЕНТАЛЬНОЕ логирование для JS хука
+            local log_rec: LogInfo;
+            log_rec$uid = c$uid;
+            log_rec$ja4l = c$conn$ja4l;
+            Log::write(FINGERPRINT::JA4L::LOG, log_rec);
+        }
     }
 }
 
-# Быстрое формирование JA4LS  
+# Быстрое формирование JA4LS - ТОЛЬКО ПОЛНЫЙ  
 function do_ja4ls_fast(c: connection) {
     if (c$fp$ja4l$synack > 0 && c$conn$ja4ls == "") {
         c$conn$ja4ls = cat(double_to_count((c$fp$ja4l$synack - c$fp$ja4l$syn) / 2.0));
@@ -66,7 +108,16 @@ function do_ja4ls_fast(c: connection) {
             c$conn$ja4ls += cat(double_to_count((c$fp$ja4l$server_hello - c$fp$ja4l$client_hello) / 2.0));
         }
         
-        print fmt("JA4LS: %s = %s", c$uid, c$conn$ja4ls);
+        # ВЫВОДИМ ТОЛЬКО ПОЛНЫЙ ОТПЕЧАТОК
+        if (is_ja4ls_complete(c$conn$ja4ls)) {
+            print fmt("JA4LS: %s = %s", c$uid, c$conn$ja4ls);
+            
+            # МОМЕНТАЛЬНОЕ логирование для JS хука
+            local log_rec: LogInfo;
+            log_rec$uid = c$uid;
+            log_rec$ja4ls = c$conn$ja4ls;
+            Log::write(FINGERPRINT::JA4L::LOG, log_rec);
+        }
     }
 }
 
@@ -92,8 +143,7 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
     local rp = get_current_packet_header();
     if (is_orig && threshold == 2) {
         c$fp$ja4l$ack = get_current_packet_timestamp();
-        # Формируем JA4L сразу после ACK
-        do_ja4l_fast(c);
+        # НЕ вызываем do_ja4l_fast здесь - ждем SSL данные
         
     } else if (is_orig && c?$fp && c$fp$ja4l$server_hello != 0 && c$fp$ja4l$first_client_data == 0) {
         if (rp?$tcp && rp$tcp$dl == 0) {
@@ -101,7 +151,7 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
             return;
         }
         c$fp$ja4l$first_client_data = get_current_packet_timestamp(); 
-        # Обновляем JA4L с SSL данными
+        # Теперь формируем ПОЛНЫЙ JA4L
         c$conn$ja4l = ""; # Сбрасываем для пересчета с SSL
         do_ja4l_fast(c);
         
@@ -117,8 +167,7 @@ event ConnThreshold::packets_threshold_crossed(c: connection, threshold: count, 
         } else {
             return;
         }
-        # Формируем JA4LS сразу после SYN-ACK
-        do_ja4ls_fast(c);
+        # НЕ вызываем do_ja4ls_fast здесь - ждем SSL данные
         
         ConnThreshold::set_packets_threshold(c,c$orig$num_pkts + 1,T);  
     }
@@ -141,7 +190,7 @@ event ssl_server_hello(c: connection, version: count, record_version: count, pos
     }
     if (c?$fp && c$fp$ja4l$server_hello == 0) {
         c$fp$ja4l$server_hello = get_current_packet_timestamp();
-        # Обновляем JA4LS с SSL данными
+        # Теперь формируем ПОЛНЫЙ JA4LS
         c$conn$ja4ls = ""; # Сбрасываем для пересчета с SSL
         do_ja4ls_fast(c);
         
@@ -175,6 +224,12 @@ event QUIC::initial_packet(c: connection, is_orig: bool, version: count, dcid: s
         c$conn$ja4ls += "q";
         
         print fmt("JA4LS QUIC: %s = %s", c$uid, c$conn$ja4ls);
+        
+        # QUIC логирование
+        local log_rec: LogInfo;
+        log_rec$uid = c$uid;
+        log_rec$ja4ls = c$conn$ja4ls;
+        Log::write(FINGERPRINT::JA4L::LOG, log_rec);
     }
 }
 
@@ -192,6 +247,12 @@ event QUIC::handshake_packet(c: connection, is_orig: bool, version: count, dcid:
         c$conn$ja4l += "q";
         
         print fmt("JA4L QUIC: %s = %s", c$uid, c$conn$ja4l);
+        
+        # QUIC логирование
+        local log_rec: LogInfo;
+        log_rec$uid = c$uid;
+        log_rec$ja4l = c$conn$ja4l;
+        Log::write(FINGERPRINT::JA4L::LOG, log_rec);
     } else {
         c$fp$ja4l$server_handshake = get_current_packet_timestamp();
     }
