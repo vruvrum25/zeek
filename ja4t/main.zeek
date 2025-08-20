@@ -1,5 +1,5 @@
 # Copyright (c) 2024, FoxIO, LLC.
-# Simplified JA4T - fast output with logging
+# Simplified JA4T - fast output with instant logging
 
 module FINGERPRINT::JA4T;
 @load ../config
@@ -23,12 +23,11 @@ export {
         rst_ts: double &default=0;
     };
     
-    # Новый тип для логирования
+    # Структура для моментального логирования
     type LogInfo: record {
         uid: string &log &optional;
         ja4t: string &log &default="";
-        ja4ts: string &log &default=""; 
-        done: bool &default=F;
+        ja4ts: string &log &default="";
     };
     
     # Логирование
@@ -39,7 +38,6 @@ export {
 
 redef record FINGERPRINT::Info += {
     ja4t: FINGERPRINT::JA4T::Info &default=Info();
-    ja4t_log: FINGERPRINT::JA4T::LogInfo &default=LogInfo();
 };
 
 redef record Conn::Info += {
@@ -116,7 +114,7 @@ function get_tcp_options(): TCP_Options {
     return opts;
 }
 
-# Быстрое формирование JA4T сразу после SYN с логированием
+# Быстрое формирование JA4T сразу после SYN + моментальное логирование
 function do_ja4t_fast(c: connection) {
     if (c$fp$ja4t$syn_window_size > 0 && c$conn$ja4t == "") {
         c$conn$ja4t = fmt("%d", c$fp$ja4t$syn_window_size);
@@ -127,16 +125,18 @@ function do_ja4t_fast(c: connection) {
         c$conn$ja4t += FINGERPRINT::delimiter;
         c$conn$ja4t += fmt("%d", c$fp$ja4t$syn_opts$window_scale);
         
+        # Моментальный вывод в консоль
         print fmt("JA4T: %s = %s", c$uid, c$conn$ja4t);
         
-        # Логирование вместо Redis
-        c$fp$ja4t_log$uid = c$uid;
-        c$fp$ja4t_log$ja4t = c$conn$ja4t;
-        Log::write(FINGERPRINT::JA4T::LOG, c$fp$ja4t_log);
+        # МОМЕНТАЛЬНОЕ логирование для JS хука
+        local log_rec: LogInfo;
+        log_rec$uid = c$uid;
+        log_rec$ja4t = c$conn$ja4t;
+        Log::write(FINGERPRINT::JA4T::LOG, log_rec);
     }
 }
 
-# Быстрое формирование JA4TS с логированием
+# Быстрое формирование JA4TS + моментальное логирование
 function do_ja4ts_fast(c: connection) {
     if (c$fp$ja4t$synack_window_size > 0 && c$conn$ja4ts == "") {
         c$conn$ja4ts = fmt("%d", c$fp$ja4t$synack_window_size);
@@ -156,12 +156,14 @@ function do_ja4ts_fast(c: connection) {
             }
         }
         
+        # Моментальный вывод в консоль
         print fmt("JA4TS: %s = %s", c$uid, c$conn$ja4ts);
         
-        # Логирование вместо Redis  
-        c$fp$ja4t_log$uid = c$uid;
-        c$fp$ja4t_log$ja4ts = c$conn$ja4ts;
-        Log::write(FINGERPRINT::JA4T::LOG, c$fp$ja4t_log);
+        # МОМЕНТАЛЬНОЕ логирование для JS хука
+        local log_rec: LogInfo;
+        log_rec$uid = c$uid;
+        log_rec$ja4ts = c$conn$ja4ts;
+        Log::write(FINGERPRINT::JA4T::LOG, log_rec);
     }
 }
 
