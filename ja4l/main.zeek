@@ -258,9 +258,6 @@ event QUIC::handshake_packet(c: connection, is_orig: bool, version: count, dcid:
 }
 
 event connection_state_remove(c: connection) {
-    # Финальная проверка - если что-то не записалось
-    if (c?$fp) {
-        do_ja4l_fast(c);
-        do_ja4ls_fast(c);
-    }
+    # ИСПРАВЛЕНО: Убраны вызовы do_ja4l_fast и do_ja4ls_fast для избежания дублей
+    # Отпечатки уже сформированы моментально в соответствующих событиях
 }
