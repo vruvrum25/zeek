@@ -210,6 +210,8 @@ event http_message_done(c: connection, is_orig: bool, stat: http_message_stat)
     c$fp$ja4h$ja4h_ro = ja4h_a + delim + ja4h_b_o + delim + ja4h_c_o + delim + ja4h_d_o;
 
     c$http$ja4h = c$fp$ja4h$ja4h;
+    print fmt("JA4H: %s = %s", c$uid, c$fp$ja4h$ja4h);
+    
     @if(FINGERPRINT::JA4H_raw)
     c$http$ja4h_r = c$fp$ja4h$ja4h_r;
     c$http$ja4h_ro = c$fp$ja4h$ja4h_ro;
