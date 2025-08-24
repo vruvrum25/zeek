@@ -91,10 +91,17 @@ function get_tcp_options(): TCP_Options {
     offset += 20;  # skip base tcp header
     while(offset < header_end) {
         local opt_kind = bytestring_to_count(pkt$data[offset]);
-        if (opt_kind == 0) {
-            break;
-        }
+        
+        # ИСПРАВЛЕНИЕ: Добавляем опцию в массив ПЕРЕД проверкой на ноль
         opts$option_kinds += opt_kind;
+        
+        # Если это End of List (0), переходим к следующему байту и продолжаем
+        # чтобы захватить все trailing нули для выравнивания
+        if (opt_kind == 0) {
+            offset += 1;
+            next;
+        }
+        
         if (opt_kind == 1  || offset + 1 >= header_end) {
             offset += 1;
             next;
